@@ -1,94 +1,89 @@
+# main.py
+# FastAPI application for serving Yahoo Finance data and raw analyst recommendation histories
+
 from fastapi import FastAPI, Security, HTTPException, Depends, Query
 from fastapi.security.api_key import APIKeyHeader
 import yfinance as yf
 import pandas as pd
 import os
 
-app = FastAPI()
+app = FastAPI(
+    title="YFinance Dynamic API",
+    description="Flexible endpoints mapping to yfinance.Ticker attributes and methods",
+    version="1.0.0"
+)
 
-# Retrieve the API key from environment
-API_KEY = os.getenv("API_KEY")
-api_key_header = APIKeyHeader(name="X-API-KEY")
+# API key configuration
+API_KEY = os.getenv("API_KEY")  # Set this environment variable
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 
-async def verify_api_key(api_key: str = Security(api_key_header)):
-    if api_key != API_KEY:
+async def verify_api_key(api_key: str = Depends(Security(api_key_header))):
+    """
+    Verify that the provided X-API-KEY header matches the expected API key.
+    """
+    if not api_key or api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
 
 
-def recs_to_records(recs: pd.DataFrame):
+def serialize(obj):
     """
-    Serialize the full recommendations DataFrame to list of dicts,
-    returning whatever columns yfinance provides.
+    Convert pandas DataFrame or Series to Python-native structures.
+    Otherwise, return the object as-is.
     """
-    if recs is None or recs.empty:
-        return []
-    df = recs.reset_index()
-    # Convert all columns to string-friendly types
-    return df.where(pd.notnull(df), None).to_dict(orient="records")
+    if isinstance(obj, pd.DataFrame):
+        df = obj.reset_index()
+        df = df.where(pd.notnull(df), None)
+        return df.to_dict(orient="records")
+    if isinstance(obj, pd.Series):
+        s = obj.where(pd.notnull(obj), None)
+        return s.to_dict()
+    return obj
+
+@app.get("/data/{method}", dependencies=[Depends(verify_api_key)])
+def get_data(
+    method: str,
+    symbols: str = Query(None, description="Comma-separated list of tickers, e.g. AAPL,INFY.NS"),
+    symbol: str = Query(None, description="Single ticker override, e.g. AAPL")
+):
+    """
+    Dynamic endpoint to fetch any attribute or zero-arg method on yfinance.Ticker.
+
+    - If `symbol` provided, queries a single ticker.
+    - Otherwise, `symbols` (comma-separated) for bulk.
+    - Maps each symbol to getattr(ticker, method) or ticker.method().
+    """
+    # Determine list of symbols
+    if symbol:
+        sym_list = [symbol.strip()]
+    elif symbols:
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    else:
+        raise HTTPException(status_code=400, detail="Must provide either `symbol` or `symbols` query parameter.")
+
+    results = {}
+    for sym in sym_list:
+        try:
+            ticker = yf.Ticker(sym)
+            # Retrieve attribute or method
+            if not hasattr(ticker, method):
+                raise AttributeError(f"Ticker has no attribute '{method}'")
+            attr = getattr(ticker, method)
+            # Call if callable (no args), else return attribute
+            data = attr() if callable(attr) else attr
+            results[sym] = serialize(data)
+        except AttributeError as ae:
+            results[sym] = {"error": str(ae)}
+        except Exception as e:
+            results[sym] = {"error": str(e)}
+    return results
 
 @app.get("/", dependencies=[Depends(verify_api_key)])
 def root():
+    """
+    Health-check and dynamic endpoint info.
+    """
     return {
-        "status": "YFinance API is live",
-        "endpoints": [
-            "/quote/{symbol}",
-            "/quotes?symbols=...",
-            "/recommendation/{symbol}",
-            "/recommendations?symbols=..."
-        ]
+        "status": "YFinance Dynamic API is live",
+        "dynamic_endpoint": "/data/{method}?symbols=... or &symbol=...",
+        "note": "`method` corresponds to any yfinance.Ticker property or zero-arg method"
     }
-
-@app.get("/quote/{symbol}", dependencies=[Depends(verify_api_key)])
-def get_quote(symbol: str):
-    """
-    Return ticker.info for a single symbol.
-    """
-    try:
-        return yf.Ticker(symbol).info
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/quotes", dependencies=[Depends(verify_api_key)])
-def get_quotes(symbols: str = Query(..., description="Comma-separated list of tickers")):
-    """
-    Batch-fetch ticker.info for multiple symbols.
-    Returns dict: symbol -> info dict.
-    """
-    syms = [s.strip() for s in symbols.split(",") if s.strip()]
-    if not syms:
-        raise HTTPException(status_code=400, detail="No symbols provided")
-    tickers = yf.Tickers(" ".join(syms))
-    result = {}
-    for s in syms:
-        t = tickers.tickers.get(s)
-        result[s] = t.info if t else {"error": "Ticker not found"}
-    return result
-
-@app.get("/recommendation/{symbol}", dependencies=[Depends(verify_api_key)])
-def get_recommendation(symbol: str):
-    """
-    Return full recommendation history for one symbol as raw records.
-    """
-    try:
-        recs = yf.Ticker(symbol).recommendations
-        return recs_to_records(recs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/recommendations", dependencies=[Depends(verify_api_key)])
-def get_recommendations(symbols: str = Query(..., description="Comma-separated list of tickers")):
-    """
-    Batch-fetch full recommendation histories for multiple symbols.
-    Returns dict: symbol -> list of raw rec record dicts.
-    """
-    syms = [s.strip() for s in symbols.split(",") if s.strip()]
-    if not syms:
-        raise HTTPException(status_code=400, detail="No symbols provided")
-    result = {}
-    for s in syms:
-        try:
-            recs = yf.Ticker(s).recommendations
-            result[s] = recs_to_records(recs)
-        except Exception as e:
-            result[s] = {"error": str(e)}
-    return result
