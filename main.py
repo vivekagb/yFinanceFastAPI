@@ -14,91 +14,67 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
     if api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
 
-# Helper to serialize recommendations DataFrame
 def recs_to_records(recs: pd.DataFrame):
+    """Serialize the full recommendations DataFrame to a list of dicts."""
     if recs is None or recs.empty:
         return []
-    df = recs.copy()
-    # reset index (date)
-    df = df.reset_index()
-    # ensure column names
-    date_col = df.columns[0]
-    df = df.rename(columns={date_col: "date", "Firm": "firm", "To Grade": "to_grade", "From Grade": "from_grade"})
-    return df.to_dict(orient="records")
-
-@app.get("/recommendation/{symbol}", dependencies=[Depends(verify_api_key)])
-def get_recommendation(symbol: str):
-    """
-    Return the full history of analyst recommendations for a single symbol.
-    """
-    try:
-        ticker = yf.Ticker(symbol)
-        recs = ticker.recommendations
-        return recs_to_records(recs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/recommendations", dependencies=[Depends(verify_api_key)])
-def get_recommendations(
-    symbols: str = Query(..., description="Comma-separated list of tickers, e.g. AAPL,INFY.NS,RELIANCE.BO")
-):
-    """
-    Batch-fetch the full recommendations history for multiple symbols.
-    Returns a dict mapping each symbol to a list of recommendation records.
-    """
-    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
-    if not sym_list:
-        raise HTTPException(status_code=400, detail="No valid symbols provided")
-
-    result = {}
-    for sym in sym_list:
-        try:
-            ticker = yf.Ticker(sym)
-            recs = ticker.recommendations
-            result[sym] = recs_to_records(recs)
-        except Exception as e:
-            result[sym] = {"error": str(e)}
-    return result
+    df = recs.reset_index().rename(
+        columns={df.index.name or "index": "date", "Firm": "firm", "To Grade": "to_grade", "From Grade": "from_grade"}
+    )
+    # keep only those four columns
+    return df[["date", "firm", "to_grade", "from_grade"]].to_dict(orient="records")
 
 @app.get("/", dependencies=[Depends(verify_api_key)])
 def root():
     return {
         "status": "YFinance API is live",
-        "usage": "/quote/{symbol}, /quotes?symbols=...",
-        "recommendation": "/recommendation/{symbol}",
-        "recommendations": "/recommendations?symbols=..."
+        "endpoints": [
+            "/quote/{symbol}",
+            "/quotes?symbols=...",
+            "/recommendation/{symbol}",
+            "/recommendations?symbols=..."
+        ]
     }
 
 @app.get("/quote/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_quote(symbol: str):
-    """
-    Existing endpoint: fetch info for a single symbol.
-    """
+    """Return ticker.info for a single symbol (no aggregation)."""
     try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info.copy()
-        return info
+        return yf.Ticker(symbol).info
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/quotes", dependencies=[Depends(verify_api_key)])
-def get_quotes(
-    symbols: str = Query(..., description="Comma-separated list of tickers, e.g. AAPL,INFY.NS,RELIANCE.BO")
-):
-    """
-    Existing bulk endpoint: batch-fetch info for multiple symbols.
-    """
-    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
-    if not sym_list:
-        raise HTTPException(status_code=400, detail="No valid symbols provided")
+def get_quotes(symbols: str = Query(..., description="Comma-separated list of tickers")):
+    """Batch-fetch ticker.info for multiple symbols (no aggregation)."""
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not syms:
+        raise HTTPException(status_code=400, detail="No symbols provided")
+    tickers = yf.Tickers(" ".join(syms))
+    out = {}
+    for s in syms:
+        t = tickers.tickers.get(s)
+        out[s] = t.info if t else {"error": "Ticker not found"}
+    return out
 
-    tickers = yf.Tickers(" ".join(sym_list))
-    result = {}
-    for sym in sym_list:
-        t = tickers.tickers.get(sym)
-        if not t:
-            result[sym] = {"error": "Ticker not found"}
-            continue
-        info = t.info.copy()
-        result[sym] = info
-    return result
+@app.get("/recommendation/{symbol}", dependencies=[Depends(verify_api_key)])
+def get_recommendation(symbol: str):
+    """Return the full, raw history of recommendations for one symbol."""
+    try:
+        return recs_to_records(yf.Ticker(symbol).recommendations)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/recommendations", dependencies=[Depends(verify_api_key)])
+def get_recommendations(symbols: str = Query(..., description="Comma-separated list of tickers")):
+    """Batch-fetch raw recommendation histories for multiple symbols."""
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not syms:
+        raise HTTPException(status_code=400, detail="No symbols provided")
+    out = {}
+    for s in syms:
+        try:
+            out[s] = recs_to_records(yf.Ticker(s).recommendations)
+        except Exception as e:
+            out[s] = {"error": str(e)}
+    return out
