@@ -17,33 +17,14 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
 
 def recs_to_records(recs: pd.DataFrame):
     """
-    Serialize full yfinance recommendations DataFrame to list of dicts:
-    fields: date, firm, to_grade, from_grade
+    Serialize the full recommendations DataFrame to list of dicts,
+    returning whatever columns yfinance provides.
     """
     if recs is None or recs.empty:
         return []
-    # Reset index to turn the Date index into a column
     df = recs.reset_index()
-    # Build rename map based on case-insensitive matching
-    col_map = {}
-    # Original index column becomes 'date'
-    idx_col = df.columns[0]
-    col_map[idx_col] = 'date'
-    for col in df.columns[1:]:
-        lc = col.lower().replace('_', ' ').strip()
-        if lc == 'firm':
-            col_map[col] = 'firm'
-        elif 'to grade' in lc.replace('\n',' '):
-            col_map[col] = 'to_grade'
-        elif 'from grade' in lc.replace('\n',' '):
-            col_map[col] = 'from_grade'
-    df = df.rename(columns=col_map)
-    # Ensure the four columns exist
-    required = ['date', 'firm', 'to_grade', 'from_grade']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise HTTPException(status_code=500, detail=f"Missing rec columns after rename: {missing}")
-    return df[required].to_dict(orient="records")
+    # Convert all columns to string-friendly types
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
 
 @app.get("/", dependencies=[Depends(verify_api_key)])
 def root():
@@ -86,13 +67,11 @@ def get_quotes(symbols: str = Query(..., description="Comma-separated list of ti
 @app.get("/recommendation/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_recommendation(symbol: str):
     """
-    Return full recommendation history for one symbol.
+    Return full recommendation history for one symbol as raw records.
     """
     try:
         recs = yf.Ticker(symbol).recommendations
         return recs_to_records(recs)
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -100,7 +79,7 @@ def get_recommendation(symbol: str):
 def get_recommendations(symbols: str = Query(..., description="Comma-separated list of tickers")):
     """
     Batch-fetch full recommendation histories for multiple symbols.
-    Returns dict: symbol -> list of rec record dicts.
+    Returns dict: symbol -> list of raw rec record dicts.
     """
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if not syms:
@@ -110,8 +89,6 @@ def get_recommendations(symbols: str = Query(..., description="Comma-separated l
         try:
             recs = yf.Ticker(s).recommendations
             result[s] = recs_to_records(recs)
-        except HTTPException as he:
-            result[s] = {"error": he.detail}
         except Exception as e:
             result[s] = {"error": str(e)}
     return result
