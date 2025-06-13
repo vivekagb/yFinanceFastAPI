@@ -6,7 +6,7 @@ import os
 
 app = FastAPI()
 
-# API key setup
+# Retrieve the API key from environment
 API_KEY = os.getenv("API_KEY")
 api_key_header = APIKeyHeader(name="X-API-KEY")
 
@@ -14,15 +14,27 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
     if api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
 
+
 def recs_to_records(recs: pd.DataFrame):
-    """Serialize the full recommendations DataFrame to a list of dicts."""
+    """
+    Serialize full yfinance recommendations DataFrame to list of dicts:
+    fields: date, firm, to_grade, from_grade
+    """
     if recs is None or recs.empty:
         return []
-    df = recs.reset_index().rename(
-        columns={df.index.name or "index": "date", "Firm": "firm", "To Grade": "to_grade", "From Grade": "from_grade"}
-    )
-    # keep only those four columns
+    # Reset index to turn the Date index into a column
+    df = recs.reset_index()
+    # Rename columns: index->date, Firm, To Grade, From Grade
+    index_col = df.columns[0]
+    df = df.rename(columns={
+        index_col:    "date",
+        "Firm":       "firm",
+        "To Grade":   "to_grade",
+        "From Grade": "from_grade"
+    })
+    # Return only the four desired columns
     return df[["date", "firm", "to_grade", "from_grade"]].to_dict(orient="records")
+
 
 @app.get("/", dependencies=[Depends(verify_api_key)])
 def root():
@@ -36,45 +48,61 @@ def root():
         ]
     }
 
+
 @app.get("/quote/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_quote(symbol: str):
-    """Return ticker.info for a single symbol (no aggregation)."""
+    """
+    Return ticker.info for a single symbol.
+    """
     try:
         return yf.Ticker(symbol).info
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/quotes", dependencies=[Depends(verify_api_key)])
 def get_quotes(symbols: str = Query(..., description="Comma-separated list of tickers")):
-    """Batch-fetch ticker.info for multiple symbols (no aggregation)."""
+    """
+    Batch-fetch ticker.info for multiple symbols.
+    Returns dict: symbol -> info dict.
+    """
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if not syms:
         raise HTTPException(status_code=400, detail="No symbols provided")
     tickers = yf.Tickers(" ".join(syms))
-    out = {}
+    result = {}
     for s in syms:
         t = tickers.tickers.get(s)
-        out[s] = t.info if t else {"error": "Ticker not found"}
-    return out
+        result[s] = t.info if t else {"error": "Ticker not found"}
+    return result
+
 
 @app.get("/recommendation/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_recommendation(symbol: str):
-    """Return the full, raw history of recommendations for one symbol."""
+    """
+    Return full recommendation history for one symbol.
+    """
     try:
-        return recs_to_records(yf.Ticker(symbol).recommendations)
+        recs = yf.Ticker(symbol).recommendations
+        return recs_to_records(recs)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/recommendations", dependencies=[Depends(verify_api_key)])
 def get_recommendations(symbols: str = Query(..., description="Comma-separated list of tickers")):
-    """Batch-fetch raw recommendation histories for multiple symbols."""
+    """
+    Batch-fetch full recommendation histories for multiple symbols.
+    Returns dict: symbol -> list of rec record dicts.
+    """
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if not syms:
         raise HTTPException(status_code=400, detail="No symbols provided")
-    out = {}
+    result = {}
     for s in syms:
         try:
-            out[s] = recs_to_records(yf.Ticker(s).recommendations)
+            recs = yf.Ticker(s).recommendations
+            result[s] = recs_to_records(recs)
         except Exception as e:
-            out[s] = {"error": str(e)}
-    return out
+            result[s] = {"error": str(e)}
+    return result
