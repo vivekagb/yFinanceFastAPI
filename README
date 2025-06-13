@@ -1,0 +1,12 @@
+# 📈 yFinance FastAPI API
+
+A lightweight, self-hosted API to fetch stock data using [yfinance](https://github.com/ranaroussi/yfinance) and serve it via a RESTful interface using [FastAPI](https://fastapi.tiangolo.com/).
+
+## 🚀 Features
+
+- Get fundamental data and analyst insights for any stock supported by Yahoo Finance
+- Simple, extensible FastAPI codebase
+- Dockerized for easy deployment (Render, Railway, etc.)
+- Free to run — no paid API required
+
+---
