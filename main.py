@@ -22,40 +22,62 @@ async def verify_api_key(api_key: APIKey = Depends(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
     return api_key
 
-
 def serialize(obj):
     """
-    Convert pandas DataFrame, Series, yfinance fund objects, or other types to serializable structures.
+    Convert Python objects into JSON-serializable primitives:
+    - Native types (str, int, float, bool, None)
+    - dict, list, tuple (recursive)
+    - pandas DataFrame / Series
+    - yfinance FundsData and other objects with __dict__
     """
-    # DataFrame → list-of-dicts
+    # Native Python primitives
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+
+    # dict → recurse
+    if isinstance(obj, dict):
+        return {k: serialize(v) for k, v in obj.items()}
+
+    # list/tuple → recurse into list
+    if isinstance(obj, (list, tuple)):
+        return [serialize(v) for v in obj]
+
+    # pandas DataFrame → list of dicts
     if isinstance(obj, pd.DataFrame):
-        df = obj.reset_index().where(pd.notnull(obj), None)
+        df = obj.reset_index()
+        df = df.where(pd.notnull(df), None)
         return df.to_dict(orient="records")
 
-    # Series → dict
+    # pandas Series → dict
     if isinstance(obj, pd.Series):
-        return obj.where(pd.notnull(obj), None).to_dict()
+        s = obj.where(pd.notnull(obj), None)
+        return s.to_dict()
 
-    # yfinance FundsData (has to_dict)
-    if hasattr(obj, "to_dict") and callable(obj.to_dict):
-        try:
-            return obj.to_dict()
-        except Exception:
-            pass
+    # Objects with __dict__ (e.g., yfinance FundsData)
+    if hasattr(obj, "__dict__"):
+        result = {}
+        for k, v in obj.__dict__.items():
+            if k.startswith("_"):
+                continue
+            # include only basic or known collections
+            if isinstance(v, (str, int, float, bool)) or v is None or isinstance(v, (dict, list, tuple, pd.DataFrame, pd.Series)):
+                result[k] = serialize(v)
+        if result:
+            return result
 
-    # NamedTuple-like (e.g., _asdict)
+    # Namedtuple-like with _asdict()
     if hasattr(obj, "_asdict") and callable(obj._asdict):
         try:
-            return obj._asdict()
+            return serialize(obj._asdict())
         except Exception:
             pass
 
-    # Last-resort JSON encoding for numpy types, dataclasses, etc.
+    # Fallback to jsonable_encoder (handles numpy, datetime, dataclass, etc.)
     try:
         return jsonable_encoder(obj)
     except Exception:
+        # Last resort: string form
         return str(obj)
-
 
 @app.get("/data/{method}")
 async def get_data(
@@ -67,6 +89,7 @@ async def get_data(
     """
     Dynamic endpoint to fetch any attribute or zero-arg method on yfinance.Ticker.
     """
+    # Build list of tickers
     if symbol:
         sym_list = [symbol]
     elif symbols:
@@ -88,17 +111,17 @@ async def get_data(
         except Exception as e:
             results[sym] = {"error": str(e)}
 
-    # Return a fully JSON-serializable response
+    # Return JSON-serializable response
     return JSONResponse(content=jsonable_encoder(results))
-
 
 @app.get("/")
 async def root(api_key: APIKey = Depends(verify_api_key)):
     """
     Health-check and dynamic endpoint info.
     """
-    return JSONResponse(content=jsonable_encoder({
+    info = {
         "status": "YFinance Dynamic API is live",
         "dynamic_endpoint": "/data/{method}?symbols=... or &symbol=...",
         "note": "`method` corresponds to any yfinance.Ticker property or zero-arg method"
-    }))
+    }
+    return JSONResponse(content=jsonable_encoder(info))
