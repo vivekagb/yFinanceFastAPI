@@ -37,7 +37,9 @@ def serialize(obj):
         return [serialize(v) for v in obj]
     # DataFrame → list of dicts
     if isinstance(obj, pd.DataFrame):
-        df = obj.reset_index().where(pd.notnull(obj), None)
+        df = obj.reset_index()
+        # turn NaN → None (so JSON can carry nulls instead of NaN)
+        df = df.fillna(value=None)
         return df.to_dict(orient="records")
     # Series → dict
     if isinstance(obj, pd.Series):
