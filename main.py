@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.security.api_key import APIKeyHeader, APIKey
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
-from yfinance import Tickers
+import yfinance as yf
 import pandas as pd
 import os
 
@@ -22,7 +22,6 @@ async def verify_api_key(api_key: APIKey = Depends(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
     return api_key
 
-
 def serialize(obj):
     """
     Convert Python objects into JSON-serializable primitives.
@@ -38,9 +37,7 @@ def serialize(obj):
         return [serialize(v) for v in obj]
     # DataFrame → list of dicts
     if isinstance(obj, pd.DataFrame):
-        df = obj.reset_index()
-        # replace NaN with None so JSON nulls are used
-        df = df.where(pd.notnull(df), None)
+        df = obj.reset_index().where(pd.notnull(obj.reset_index()), None)
         return df.to_dict(orient="records")
     # Series → dict
     if isinstance(obj, pd.Series):
@@ -50,7 +47,6 @@ def serialize(obj):
         return jsonable_encoder(obj)
     except Exception:
         return str(obj)
-
 
 @app.get("/data/{method}")
 async def get_data(
@@ -72,38 +68,24 @@ async def get_data(
     else:
         raise HTTPException(status_code=400, detail="Provide `symbol` or `symbols` parameter.")
 
-    # Batch-load all tickers in one go
-    batch = Tickers(" ".join(tickers))
-
-    # Dynamically navigate into the desired attribute/method on the batch object
-    parts = method.split('.')
-    current = batch
-    for part in parts:
-        if not hasattr(current, part):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{type(current).__name__}' object has no attribute '{part}'"
-            )
-        current = getattr(current, part)
-        current = current() if callable(current) else current
-
     results = {}
-    # If it's a DataFrame with a MultiIndex (ticker as level 0), split per symbol
-    if isinstance(current, pd.DataFrame) and isinstance(current.index, pd.MultiIndex):
-        for sym in tickers:
-            try:
-                sub_df = current.xs(sym, level=0)
-                results[sym] = serialize(sub_df)
-            except KeyError:
-                results[sym] = {"error": f"No data found for {sym}"}
-    else:
-        # Fallback: same result for every ticker
-        serial = serialize(current)
-        for sym in tickers:
-            results[sym] = serial
+    for sym in tickers:
+        try:
+            ticker = yf.Ticker(sym)
+            # Navigate nested parts
+            parts = method.split('.')
+            current = ticker
+            for part in parts:
+                if not hasattr(current, part):
+                    raise AttributeError(f"'{type(current).__name__}' object has no attribute '{part}'")
+                attr = getattr(current, part)
+                current = attr() if callable(attr) else attr
+            # Serialize final object
+            results[sym] = serialize(current)
+        except Exception as e:
+            results[sym] = {"error": str(e)}
 
     return JSONResponse(content=jsonable_encoder(results))
-
 
 @app.get("/")
 async def root(api_key: APIKey = Depends(verify_api_key)):
